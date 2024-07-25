@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Paste KV code to syntax check and indent</title>
+    <style type="text/css" media="screen">
+      body {
+        overflow: hidden;
+        padding: 0;
+        margin: 0;
+      }
+
+      .root {
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .title {
+        width: 100%;
+        height: 40px;
+        background-color: rgba(0, 0, 0, 0.1);
+        display: flex;
+        align-items: center;
+      }
+
+      .btn {
+        width: 56px;
+        height: 30px;
+        margin-left: 200px;
+      }
+
+      .main {
+        flex: 1;
+        display: flex;
+        margin-top: 10px;
+      }
+
+      #editor {
+        flex: 1;
+        width: 50%;
+      }
+
+      #editor2 {
+        flex: 1;
+        width: 50%;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="root">
+      <div class="title">
+        <button class="btn" id="btnFormat" onclick="doFormat()">格式化</button>
+      </div>
+      <div class="main">
+        <div id="editor"></div>
+        <div id="editor2"></div>
+      </div>
+    </div>
+
+    <script src="./ace.js" type="text/javascript" charset="utf-8"></script>
+    <script>
+      var isError = false;
+      function refreshBtn() {
+        var button = document.getElementById('btnFormat');
+        button.disabled = isError;
+      }
+
+      function setKVSpace(input) {
+        return input.replace(/"([^"]*)"\s*"([^"]*)"/g, '"$1" "$2"');
+      }
+
+      function doFormat() {
+        const originalContent = editor.getValue();
+        let formattedContent = '';
+        let indentLevel = 0;
+        originalContent.split('\n').forEach(line => {
+          line = line.trim();
+          if (line === '') {
+            return;
+          }
+          if (line.startsWith('}')) {
+            indentLevel--;
+          }
+          const commentIndex = line.indexOf('//');
+          let formattedLine = '    '.repeat(indentLevel);
+          if (commentIndex === 0) {
+            // 注释行
+            formattedLine += line;
+          } else if (commentIndex > 0) {
+            // 尾部注释
+            const keyValue = line.substring(0, commentIndex).trim();
+            if (keyValue.endsWith('{')) {
+              indentLevel++;
+            }
+            const comment = line.substring(commentIndex).trim();
+            formattedLine += setKVSpace(keyValue) + ' ' + comment;
+          } else {
+            // 无注释
+            const keyValue = setKVSpace(line);
+            formattedLine += keyValue;
+            if (keyValue.endsWith('{')) {
+              indentLevel++;
+            }
+          }
+          formattedContent += formattedLine + '\n';
+        });
+        editor.setValue(formattedContent);
+      }
+
+      var editor = ace.edit('editor');
+      var editor2 = ace.edit('editor2');
+      editor2.setReadOnly(true);
+
+      var isComment = function (str) {
+        return str.trim().startsWith('//');
+      };
+
+      var isWhitespace = function (str) {
+        return str.trim().length == 0;
+      };
+
+      var goodLine = function (str) {
+        str = str.trim();
+        if (str.indexOf('//') != -1) {
+          return str.substring(0, str.indexOf('//')).trim();
+        } else {
+          return str;
+        }
+      };
+
+      editor.setShowPrintMargin(false);
+      editor2.setShowPrintMargin(false);
+      editor.getSession().on('change', function () {
+        isError = true;
+        var textToProcess = editor.getValue();
+        textToProcess = textToProcess.replace('\\"', '');
+        textToProcess = textToProcess.replace("\\'", '');
+        var lines = textToProcess.split('\n');
+        var hasErrors = false;
+        var text = '';
+        var waitingOnBracket = false;
+        var bracketry = 0;
+        var prevLineNo = 1;
+        var hasBeenFirst = false;
+        var hasBeenFirstEntry = false;
+        for (var i = 0; i < lines.length; i++) {
+          if (!(isComment(lines[i]) || isWhitespace(lines[i]))) {
+            //Its an actual line of KV code, write accordingly.
+
+            //Prep the line for input
+            var line = goodLine(lines[i]);
+
+            if (
+              (!(line.split(' ')[0].trim() == '#base') &&
+                (bracketry < 0 || (bracketry == 0 && hasBeenFirst)) &&
+                line != '{') ||
+              (bracketry == 0 && line == '{' && hasBeenFirstEntry)
+            ) {
+              if (!line.split(' ')[1] || line.split(' ')[1].trim() != '{') {
+                text =
+                  text +
+                  '\nFile terminated too early on line ' +
+                  (i + 1) +
+                  ' : ' +
+                  line.trim();
+              }
+              bracketry = 0;
+            }
+            if (
+              line == '{' ||
+              (line.split(' ')[1] && line.split(' ')[1].trim() == '{')
+            ) {
+              hasBeenFirstEntry = true;
+            }
+            hasBeenFirst = true;
+            //If the previous line only had two quotes, ensure that this line is a bracket
+            if (line.split(' ')[0].trim() == '#base') {
+            } else if (line == '{}') {
+              if (waitingOnBracket) {
+                waitingOnBracket = false;
+              }
+            } else if (line == '{' || line == '}') {
+              if (waitingOnBracket && line == '}') {
+                text =
+                  text +
+                  '\nExpected open block, got close block for line ' +
+                  prevLineNo +
+                  ' at line ' +
+                  (i + 1) +
+                  ' : ' +
+                  line.trim();
+              }
+              if (line == '{') {
+                if (!waitingOnBracket) {
+                  text = text + '\nUnexpected: Open Bracket on line ' + (i + 1);
+                }
+                waitingOnBracket = false;
+                bracketry++;
+              } else {
+                bracketry--;
+
+                if (bracketry < 0) {
+                  text = text + '\nToo many close brackets on line ' + (i + 1);
+                }
+              }
+            } else {
+              var split = line.split('"');
+              if (split.length == 3) {
+                if (waitingOnBracket) {
+                  //text = text + "\ndebug2 " + line
+                  if (split[2].trim().indexOf('{}') == -1) {
+                    if (
+                      split[0].trim().length != 0 ||
+                      split[2].trim().length != 0
+                    ) {
+                      text =
+                        text +
+                        '\nText outside of quotations on line ' +
+                        (i + 1) +
+                        ' : ' +
+                        line.trim();
+                    }
+                    waitingOnBracket = false;
+                  } else {
+                    text =
+                      text +
+                      '\nExpected {, got K/V block on line ' +
+                      (i + 1) +
+                      ' : ' +
+                      line;
+                  }
+                } else if (split[2].trim().indexOf('{}') == -1) {
+                  //text = text + "\ndebug3 " + line
+                  if (split[2].trim() == '{') {
+                    bracketry++;
+                  } else if (
+                    split[0].trim().length != 0 ||
+                    split[2].trim().length != 0
+                  ) {
+                    text =
+                      text +
+                      '\nText outside of quotations on line ' +
+                      (i + 1) +
+                      ' : ' +
+                      line.trim();
+                    waitingOnBracket = true;
+                  } else {
+                    waitingOnBracket = true;
+                  }
+                }
+                // text = text + "\ndebug " + split[2] + " " + split[2].trim().indexOf("{}") + " " + waitingOnBracket;
+              } else if (waitingOnBracket) {
+                text =
+                  text +
+                  '\nExpected open bracket, got new K/V on line ' +
+                  (i + 1) +
+                  ' : ' +
+                  line.trim();
+              } else {
+                if (split.length % 2 != 1) {
+                  text =
+                    text +
+                    '\nIncorrect Number of Quotations on line ' +
+                    (i + 1) +
+                    ' : ' +
+                    line.trim();
+                  if (split.indexOf('\\') != -1) {
+                    text =
+                      text +
+                      '\n    Note- escaped character detected. The parser does not support escaped quotes.';
+                  }
+                } else {
+                  //Ensure all text is whtin quotations
+                  var foundQuotationBug = false;
+                  var hasBrackets = false;
+                  var hadOpen = false;
+                  var hadClose = false;
+                  for (var i2 = 0; i2 < split.length; i2++) {
+                    if (
+                      split[i2].trim().length > 0 &&
+                      i2 % 2 == 0 &&
+                      split[i2].trim() != '{}'
+                    ) {
+                      if (
+                        (split[i2].trim() == '{' && i2 == 2) ||
+                        (split[i2].trim() == '}' && i2 == 6)
+                      ) {
+                        if (split[i2].trim() == '{') {
+                          if (hadOpen) {
+                            text =
+                              text +
+                              '\nUnknown error occurred on line ' +
+                              (i + 1) +
+                              ' : ' +
+                              line.trim();
+                          } else {
+                            hadOpen = true;
+                          }
+                        } else {
+                          if (hadClose) {
+                            text =
+                              text +
+                              '\nUnknown error occurred on line ' +
+                              (i + 1) +
+                              ' : ' +
+                              line.trim();
+                          } else {
+                            hadClose = true;
+                          }
+                        }
+                      } else {
+                        text =
+                          text +
+                          '\nText outside of quotations on line ' +
+                          (i + 1) +
+                          ' : ' +
+                          line.trim();
+                        foundQuotationBug = true;
+                        break;
+                      }
+                    } else if (split[i2].trim() == '{}') {
+                      hasBrackets = true;
+                    }
+                  }
+                  if (hasBrackets && split.length != 3) {
+                    text =
+                      text +
+                      '\nIncorrect Number of Quotations on line ' +
+                      (i + 1) +
+                      ' : ' +
+                      line.trim();
+                  } else if (
+                    split.length > 5 &&
+                    !foundQuotationBug &&
+                    !(hadOpen && hadClose && split.length == 7)
+                  ) {
+                    text =
+                      text +
+                      '\nInterpreter cannot parse more than one KV per line on line ' +
+                      (i + 1) +
+                      ' : ' +
+                      line.trim();
+                  } else if (bracketry == 0 && i != 0) {
+                    text =
+                      text +
+                      '\nText outside of root bracket on line ' +
+                      (i + 1) +
+                      ' : ' +
+                      line.trim();
+                  }
+                }
+              }
+            }
+            prevLineNo = i + 1;
+          }
+          //code here using lines[i] which will give you each line
+        }
+        if (bracketry != 0) {
+          text =
+            text +
+            '\nUnexpected: End of File (missing ' +
+            bracketry +
+            ' closing bracket' +
+            (bracketry == 1 ? '' : 's') +
+            ')';
+        }
+        if (text == '') {
+          //editor2.setValue(editor.getValue());
+          editor2.setValue(
+            'Your KV text (should be) completely fine!\n\n\nPlease note that this checker does not check for many things, but two in particular: \n    - If the values are correct. E.g. if you put "Damage" for your damage type, it would not get that.\n    - If you forgot to close a block but accidentally closed it later on.',
+          );
+          isError = false;
+        } else {
+          editor2.setValue(text.trim());
+        }
+        editor2.selection.moveTo(0, 0);
+
+        refreshBtn();
+      });
+      editor.setValue(
+        '"Sample Debugger"\n{\n    "Test Key" Test Error "Test Value"\n    "Only one quote on a line?" "Why how did" "that happen?\n}"',
+      );
+    </script>
+  </body>
+</html>
